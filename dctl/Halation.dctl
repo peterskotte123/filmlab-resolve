@@ -1,0 +1,56 @@
+// Film halation: bright light passes the emulsion, bounces off the film base and re-exposes the red
+// (and a little of the green) layer around highlights. Applied to scene light, BEFORE the film LUT.
+// Input/output: DaVinci Wide Gamut / DaVinci Intermediate.
+
+DEFINE_UI_PARAMS(amount, Amount, DCTLUI_SLIDER_FLOAT, 0.5, 0.0, 2.0, 0.01)
+DEFINE_UI_PARAMS(radius, Radius (px at 1080p), DCTLUI_SLIDER_FLOAT, 30.0, 2.0, 150.0, 1.0)
+DEFINE_UI_PARAMS(threshold, Threshold (stops over grey), DCTLUI_SLIDER_FLOAT, 3.0, 0.0, 8.0, 0.1)
+DEFINE_UI_PARAMS(warmth, Green Spill, DCTLUI_SLIDER_FLOAT, 0.15, 0.0, 0.6, 0.01)
+DEFINE_UI_PARAMS(show, Show Halation Only, DCTLUI_CHECK_BOX, 0)
+
+#define SAMPLES 96
+
+__DEVICE__ float di_to_lin(float v) {
+    if (v <= 0.02740668f) return v / 10.44426855f;
+    return _exp2f(v / 0.07329248f - 7.0f) - 0.0075f;
+}
+
+__DEVICE__ float lin_to_di(float v) {
+    if (v <= 0.00262409f) return v * 10.44426855f;
+    return (_log2f(v + 0.0075f) + 7.0f) * 0.07329248f;
+}
+
+__DEVICE__ float source(__TEXTURE__ tex, int x, int y, int w, int h, float thr) {
+    int cx = x < 0 ? 0 : (x >= w ? w - 1 : x);
+    int cy = y < 0 ? 0 : (y >= h ? h - 1 : y);
+    return _fmaxf(di_to_lin(_tex2D(tex, cx, cy)) - thr, 0.0f);
+}
+
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTURE__ p_TexR, __TEXTURE__ p_TexG, __TEXTURE__ p_TexB)
+{
+    float r = di_to_lin(_tex2D(p_TexR, p_X, p_Y));
+    float g = di_to_lin(_tex2D(p_TexG, p_X, p_Y));
+    float b = di_to_lin(_tex2D(p_TexB, p_X, p_Y));
+
+    float thr = 0.18f * _exp2f(threshold);
+    float rad = radius * (float)p_Height / 1080.0f;
+
+    // Vogel spiral over the disk, exponential falloff; per-pixel rotation hides the sample pattern
+    float jitter = 52.9829189f * (0.06711056f * p_X + 0.00583715f * p_Y);
+    jitter = (jitter - _floorf(jitter)) * 6.2831853f;
+    float sum = 0.0f;
+    float wsum = 0.0f;
+    for (int i = 0; i < SAMPLES; i++) {
+        float d = _sqrtf((i + 0.5f) / SAMPLES);
+        float a = i * 2.3999632f + jitter;
+        float wgt = _expf(-3.0f * d);
+        int sx = p_X + (int)_round(_cosf(a) * d * rad);
+        int sy = p_Y + (int)_round(_sinf(a) * d * rad);
+        sum += wgt * source(p_TexR, sx, sy, p_Width, p_Height, thr);
+        wsum += wgt;
+    }
+    float halo = amount * sum / wsum;
+
+    if (show) return make_float3(lin_to_di(halo), lin_to_di(halo * warmth), lin_to_di(0.0f));
+    return make_float3(lin_to_di(r + halo), lin_to_di(g + halo * warmth), lin_to_di(b));
+}
